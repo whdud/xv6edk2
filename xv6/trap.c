@@ -74,6 +74,7 @@ trap(struct trapframe *tf)
     break;
   case T_IRQ0 + 0xB:
     i8254_intr();
+    ideintr();  // virtio-blk shares IRQ 11; ISR check filters spurious calls
     lapiceoi();
     break;
   case T_IRQ0 + IRQ_SPURIOUS:

@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>xv6 Virtio-blk 드라이버 구현 보고서</title>
+<style>
+  body {
+    font-family: 'Malgun Gothic', '맑은 고딕', sans-serif;
+    max-width: 800px;
+    margin: 40px auto;
+    padding: 0 20px;
+    line-height: 1.8;
+    font-size: 11pt;
+    color: #222;
+  }
+  h1 { font-size: 20pt; text-align: center; margin-bottom: 30px; border-bottom: 2px solid #333; padding-bottom: 10px; }
+  h2 { font-size: 15pt; margin-top: 30px; border-bottom: 1px solid #999; padding-bottom: 5px; }
+  h3 { font-size: 12pt; margin-top: 20px; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 10pt; }
+  th, td { border: 1px solid #999; padding: 6px 10px; text-align: left; }
+  th { background-color: #f0f0f0; font-weight: bold; }
+  code { background-color: #f4f4f4; padding: 1px 4px; font-family: 'Consolas', 'Courier New', monospace; font-size: 10pt; }
+  pre { background-color: #f4f4f4; padding: 12px; border: 1px solid #ddd; overflow-x: auto; font-family: 'Consolas', 'Courier New', monospace; font-size: 9.5pt; line-height: 1.5; }
+  pre code { background: none; padding: 0; }
+  strong { color: #111; }
+  hr { border: none; border-top: 1px solid #ccc; margin: 25px 0; }
+  @media print {
+    body { margin: 20px; font-size: 10pt; }
+    h1 { font-size: 18pt; }
+    h2 { font-size: 13pt; page-break-after: avoid; }
+    h3 { font-size: 11pt; page-break-after: avoid; }
+    pre { font-size: 8.5pt; page-break-inside: avoid; }
+    table { page-break-inside: avoid; font-size: 9pt; }
+  }
+</style>
+</head>
+<body>
+
+<h1>xv6 Virtio-blk 드라이버 구현 보고서</h1>
+
+<h2>1. 개요</h2>
+
+<h3>1.1 배경</h3>
+<p>xv6 운영체제는 교육용으로 설계된 간단한 Unix 계열 OS로, 기본적으로 IDE 하드디스크 드라이버(<code>ide.c</code>)를 통해 디스크 I/O를 수행한다. 그러나 UEFI 부팅 환경에서는 기존 IDE 컨트롤러 접근 방식이 제한되어, <code>memide.c</code>를 사용한 메모리 기반 파일시스템(<code>kernelmemfs</code>)으로 우회하고 있었다. 이는 디스크에 실제로 쓰기가 불가능하며, 모든 파일시스템 데이터가 커널 바이너리에 내장되는 한계가 있다.</p>
+
+<h3>1.2 목표</h3>
+<p>QEMU의 virtio-blk 가상 디스크 장치를 통해 xv6에서 실제 디스크 I/O를 수행할 수 있는 드라이버를 구현한다.</p>
+
+<h3>1.3 개발 환경</h3>
+<table>
+<tr><th>항목</th><th>내용</th></tr>
+<tr><td>Host OS</td><td>Windows 11 Pro (WSL2 Ubuntu 24.04)</td></tr>
+<tr><td>에뮬레이터</td><td>QEMU 8.x (qemu-system-x86_64)</td></tr>
+<tr><td>펌웨어</td><td>OVMF (UEFI)</td></tr>
+<tr><td>대상 OS</td><td>xv6 (32-bit, i386)</td></tr>
+<tr><td>컴파일러</td><td>GCC (-m32 -Werror)</td></tr>
+<tr><td>virtio 모드</td><td>Legacy (Transitional) PCI Interface</td></tr>
+</table>
+
+<hr>
+
+<h2>2. Virtio 아키텍처 개요</h2>
+
+<h3>2.1 Virtio란?</h3>
+<p>Virtio는 가상화 환경에서 게스트 OS와 하이퍼바이저 간 효율적인 I/O를 위한 표준 인터페이스이다. 하드웨어를 완전히 에뮬레이션하는 대신, 게스트가 가상화 환경임을 인지하고 최적화된 프로토콜로 통신한다.</p>
+
+<h3>2.2 Legacy PCI Interface</h3>
+<p>본 구현은 virtio legacy (0.9.5) PCI 인터페이스를 사용한다. BAR0에 매핑된 I/O 포트를 통해 디바이스와 통신하며, 주요 레지스터는 다음과 같다:</p>
+
+<table>
+<tr><th>오프셋</th><th>크기</th><th>레지스터</th><th>설명</th></tr>
+<tr><td>0x00</td><td>4B</td><td>HOST_FEATURES</td><td>디바이스가 지원하는 기능</td></tr>
+<tr><td>0x04</td><td>4B</td><td>GUEST_FEATURES</td><td>드라이버가 수락한 기능</td></tr>
+<tr><td>0x08</td><td>4B</td><td>QUEUE_PFN</td><td>Virtqueue 물리 페이지 번호</td></tr>
+<tr><td>0x0C</td><td>2B</td><td>QUEUE_SIZE</td><td>큐의 디스크립터 수 (읽기 전용)</td></tr>
+<tr><td>0x0E</td><td>2B</td><td>QUEUE_SEL</td><td>큐 선택</td></tr>
+<tr><td>0x10</td><td>2B</td><td>QUEUE_NOTIFY</td><td>디바이스에 알림</td></tr>
+<tr><td>0x12</td><td>1B</td><td>STATUS</td><td>디바이스 상태</td></tr>
+<tr><td>0x13</td><td>1B</td><td>ISR</td><td>인터럽트 상태</td></tr>
+</table>
+
+<h3>2.3 Virtqueue 구조</h3>
+<p>Virtqueue는 드라이버와 디바이스 간 데이터를 주고받는 링 버퍼 구조로, 세 부분으로 구성된다:</p>
+
+<pre><code>+---------------------------+
+| Descriptor Table          |  &larr; 각 16바이트, queue_size개
+| (addr, len, flags, next)  |
++---------------------------+  &larr; 페이지 정렬
+| Available Ring            |  &larr; 드라이버 &rarr; 디바이스
+| (flags, idx, ring[])      |
++---------------------------+  &larr; 다음 페이지 경계로 정렬
+| Used Ring                 |  &larr; 디바이스 &rarr; 드라이버
+| (flags, idx, ring[])      |
++---------------------------+</code></pre>
+
+<p><strong>메모리 레이아웃 계산 (queue_size = 256 기준):</strong></p>
+<ul>
+<li>Descriptor Table: 256 &times; 16 = 4096 bytes</li>
+<li>Available Ring: 6 + 256 &times; 2 = 518 bytes</li>
+<li>desc + avail 합계: 4614 &rarr; 페이지 정렬 &rarr; Used Ring 오프셋 = 8192</li>
+<li>Used Ring: 6 + 256 &times; 8 = 2054 bytes</li>
+<li>총 필요 메모리: 8192 + 2054 &asymp; 10246 bytes &rarr; 16384 bytes (4 pages) 할당</li>
+</ul>
+
+<h3>2.4 Virtio-blk 요청 구조</h3>
+<p>하나의 블록 I/O 요청은 3개의 디스크립터 체인으로 구성된다:</p>
+
+<pre><code>Descriptor 0 (Header)     &rarr; Descriptor 1 (Data)      &rarr; Descriptor 2 (Status)
++---------------------+    +----------------------+    +------------------+
+| type (IN/OUT)       |    | 512B 데이터 버퍼      |    | 1B 상태 코드     |
+| reserved            |    | (읽기: 디바이스 쓰기)  |    | (디바이스 쓰기)  |
+| sector (LBA)        |    | (쓰기: 디바이스 읽기)  |    | 0=OK, 1=Error   |
+| flags: NEXT         |    | flags: WRITE|NEXT     |    | flags: WRITE     |
++---------------------+    +----------------------+    +------------------+
+  디바이스가 읽음              방향에 따라 다름             디바이스가 씀</code></pre>
+
+<hr>
+
+<h2>3. 구현 상세</h2>
+
+<h3>3.1 파일 구성</h3>
+<table>
+<tr><th>파일</th><th>설명</th><th>변경 유형</th></tr>
+<tr><td><code>virtio_blk.h</code></td><td>레지스터 정의, 구조체 선언</td><td>신규</td></tr>
+<tr><td><code>virtio_blk.c</code></td><td>드라이버 본체 (초기화, I/O, 인터럽트)</td><td>신규</td></tr>
+<tr><td><code>pci.c</code></td><td>PCI 디바이스 탐색 시 virtio-blk 감지 추가</td><td>수정</td></tr>
+<tr><td><code>trap.c</code></td><td>IRQ 11 핸들러에 ideintr() 호출 추가</td><td>수정</td></tr>
+<tr><td><code>main.c</code></td><td>pci_init()을 ideinit() 앞으로 이동</td><td>수정</td></tr>
+<tr><td><code>Makefile</code></td><td>kernelvirtio 빌드 타겟 추가</td><td>수정</td></tr>
+<tr><td><code>run_virtio.sh</code></td><td>QEMU 실행 스크립트</td><td>신규</td></tr>
+</table>
+
+<h3>3.2 디바이스 초기화 과정 (<code>virtio_blk_init</code>)</h3>
+<p>Virtio 스펙에 정의된 초기화 시퀀스를 따른다:</p>
+<pre><code>1. Reset          &rarr; STATUS = 0
+2. Acknowledge    &rarr; STATUS |= ACKNOWLEDGE (1)
+3. Driver         &rarr; STATUS |= DRIVER (2)
+4. Feature 협상   &rarr; GUEST_FEATURES = 0 (추가 기능 미사용)
+5. Virtqueue 설정 &rarr; 큐 선택, 크기 읽기, 메모리 배치, PFN 전달
+6. Driver OK      &rarr; STATUS |= DRIVER_OK (4)
+7. IOAPIC 설정    &rarr; Level-triggered, Active-low 인터럽트</code></pre>
+
+<h3>3.3 PCI 디바이스 감지</h3>
+<p>기존 PCI 스캔 코드(<code>pci.c</code>)에 virtio-blk 감지 로직을 추가하였다:</p>
+<pre><code>// pci.c - pci_init_device() 내부
+if(vendor_id == 0x1AF4 &amp;&amp; device_id == 0x1001){
+    cprintf("Virtio Block Device Found\n");
+    virtio_blk_init(&amp;dev);
+}</code></pre>
+<ul>
+<li>Vendor ID <code>0x1AF4</code>: Red Hat (virtio 표준)</li>
+<li>Device ID <code>0x1001</code>: virtio-blk legacy (0x1000 + device_type)</li>
+</ul>
+
+<h3>3.4 I/O 경로</h3>
+<p>xv6의 기존 디스크 I/O 인터페이스(<code>ideinit</code>, <code>iderw</code>, <code>ideintr</code>)를 그대로 유지하여, 상위 계층(bio.c, fs.c, log.c)의 수정 없이 드라이버를 교체하였다.</p>
+<pre><code>bio.c: bread()/bwrite()
+    &darr;
+virtio_blk.c: iderw(buf)
+    &darr;
+virtio_blk_submit(buf)     &larr; 디스크립터 체인 구성, Available Ring에 추가, Notify
+    &darr;
+Polling loop               &larr; Used Ring 확인, 완료 시 buf 플래그 갱신</code></pre>
+
+<h3>3.5 QEMU 실행 구성</h3>
+<pre><code>qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd \
+    -drive if=ide,file=fat:rw:image,index=0,media=disk \
+    -device virtio-blk-pci,drive=hd1,disable-modern=on \
+    -drive id=hd1,file=xv6/fs.img,format=raw,if=none \
+    -m 2048 -smp 4 -serial mon:stdio -vga std</code></pre>
+<ul>
+<li><code>disable-modern=on</code>: Modern (1.0+) 인터페이스를 비활성화하여 Legacy 모드 강제</li>
+<li><code>fs.img</code>: xv6의 파일시스템 이미지를 virtio-blk 디스크로 연결</li>
+<li>IDE 드라이브: UEFI 부트로더 + 커널 이미지 (FAT 파티션)</li>
+</ul>
+
+<hr>
+
+<h2>4. 트러블슈팅</h2>
+
+<h3>4.1 문제 1: "Guest says index 257 is available" 오류</h3>
+<p><strong>증상:</strong> QEMU가 <code>qemu: Guest says index 257 is available</code> 에러를 출력하며 I/O 실패.</p>
+<p><strong>원인:</strong> 초기 구현에서 8KB 정적 버퍼(<code>vq_mem[8192]</code>)를 사용했으나, 이 버퍼의 가상 주소를 <code>V2P()</code> 매크로로 변환한 물리 주소가 연속적이지 않을 수 있었다. 또한 queue_size를 32로 임의로 제한하면서 디바이스가 기대하는 것과 다른 메모리 레이아웃이 만들어졌다.</p>
+<p><strong>해결:</strong> 고정 물리 주소(0x800000, 8MB 지점)를 사용하도록 변경. 이 주소는 커널보다 위에 있고 RAM 범위 내에 있으며, 물리적으로 연속된 것이 보장된다.</p>
+<pre><code>uint phys_base = 0x800000;
+char *base = P2V(phys_base);
+memset(base, 0, 16384);</code></pre>
+
+<h3>4.2 문제 2: 인터럽트 미전달 (Used Ring 갱신 안 됨)</h3>
+<p><strong>증상:</strong> 요청 제출 후 <code>used-&gt;idx</code>가 0에서 변하지 않음. ISR 레지스터도 0.</p>
+<p><strong>원인:</strong> xv6의 <code>ioapicenable()</code> 함수는 Edge-triggered 모드로 인터럽트를 설정한다. 그러나 PCI 디바이스의 인터럽트는 Level-triggered, Active-low여야 한다.</p>
+<p><strong>해결:</strong> IOAPIC 리다이렉션 엔트리를 직접 작성하여 Level-triggered + Active-low로 설정:</p>
+<pre><code>volatile uint *ioapic_reg = (volatile uint *)0xFEC00000;
+// Low 32비트: 벡터 + level-triggered(bit 15) + active-low(bit 13)
+ioapic_reg[0] = 0x10 + 2 * virtio_irq;
+ioapic_reg[4] = (T_IRQ0 + virtio_irq) | 0x00008000 | 0x00002000;
+// High 32비트: CPU 0으로 라우팅
+ioapic_reg[0] = 0x10 + 2 * virtio_irq + 1;
+ioapic_reg[4] = 0 &lt;&lt; 24;</code></pre>
+
+<h3>4.3 문제 3: 연속 물리 페이지 할당 실패</h3>
+<p><strong>증상:</strong> <code>kalloc()</code>으로 여러 페이지를 할당받아 연속성을 확인하려 했으나, free list가 단편화되어 연속 페이지를 찾지 못함. <code>panic("virtio-blk: cannot find contiguous pages")</code> 발생.</p>
+<p><strong>원인:</strong> xv6의 <code>kalloc()</code>은 단일 페이지 할당기로, 연속된 물리 페이지 할당을 보장하지 않는다.</p>
+<p><strong>해결:</strong> <code>kalloc()</code>을 사용하지 않고, 고정 물리 주소 0x800000을 직접 사용. 이 영역은 커널 로드 영역(~0x19C000) 위에 있어 충돌하지 않으며, <code>kinit2()</code>에서 free list에 등록되기 전에 사용하므로 안전하다.</p>
+
+<h3>4.4 문제 4: Queue Size 불일치 (핵심 버그)</h3>
+<p><strong>증상:</strong> 인터럽트 설정, 물리 주소 문제를 모두 해결한 후에도 <code>used-&gt;idx</code>가 여전히 0. 디바이스가 요청을 전혀 처리하지 않음.</p>
+
+<p><strong>디버깅 과정:</strong></p>
+<ol>
+<li>QEMU 모니터에서 <code>info qtree</code> 명령으로 디바이스 상태 확인</li>
+<li>디바이스의 <code>vring.num = 256</code> 확인 &mdash; 디바이스는 256개 디스크립터 기준으로 동작</li>
+</ol>
+
+<p><strong>원인:</strong> 드라이버의 <code>VIRTIO_QUEUE_NUM_MAX</code>가 128로 정의되어 있었다. 디바이스는 queue_size=256을 보고하지만 드라이버가 128로 캡을 걸었다. 문제는 <strong>디바이스는 항상 자신의 queue_size(256)를 기준으로 메모리 레이아웃을 계산</strong>한다는 점이다.</p>
+
+<pre><code>드라이버 기준 (queue_size=128):          디바이스 기준 (queue_size=256):
+Desc:   0 ~ 2047   (128*16)            Desc:   0 ~ 4095   (256*16)
+Avail:  2048 ~ 2309                     Avail:  4096 ~ 4613
+Used:   4096 ~     (페이지 정렬)         Used:   8192 ~     (페이지 정렬)</code></pre>
+
+<p>드라이버가 Available Ring을 오프셋 2048에 쓰지만, 디바이스는 오프셋 4096에서 Available Ring을 읽으려 한다. 서로 다른 위치를 보고 있으므로 디바이스는 새 요청을 감지하지 못한다.</p>
+
+<p><strong>해결:</strong> <code>VIRTIO_QUEUE_NUM_MAX</code>를 256으로 변경하고, 메모리 할당을 16384 bytes (4 pages)로 확대:</p>
+<pre><code>// virtio_blk.h
+#define VIRTIO_QUEUE_NUM_MAX  256  // 기존: 128
+
+// virtio_blk.c
+memset(base, 0, 16384);  // 기존: 8192</code></pre>
+
+<h3>4.5 문제 5: IRQ 11 공유</h3>
+<p><strong>증상:</strong> virtio-blk(IRQ 11)과 E1000 NIC(IRQ 11)이 같은 인터럽트 라인을 공유.</p>
+<p><strong>해결:</strong> <code>trap.c</code>의 IRQ 11 핸들러에서 두 드라이버의 인터럽트 핸들러를 모두 호출. <code>ideintr()</code>는 내부에서 ISR 레지스터를 확인하여 자신에게 해당하지 않는 인터럽트를 필터링한다:</p>
+<pre><code>case T_IRQ0 + 0xB:
+    i8254_intr();     // E1000 NIC
+    ideintr();        // virtio-blk (ISR 체크로 spurious 필터링)
+    lapiceoi();
+    break;</code></pre>
+
+<h3>4.6 문제 요약</h3>
+<table>
+<tr><th>순서</th><th>문제</th><th>근본 원인</th><th>해결 방법</th></tr>
+<tr><td>1</td><td>index 257 오류</td><td>비연속 물리 메모리</td><td>고정 물리 주소 사용</td></tr>
+<tr><td>2</td><td>인터럽트 미전달</td><td>Edge-triggered 설정</td><td>IOAPIC 직접 설정 (Level-triggered)</td></tr>
+<tr><td>3</td><td>연속 페이지 할당 실패</td><td>kalloc 단편화</td><td>고정 물리 주소 0x800000</td></tr>
+<tr><td>4</td><td><strong>디바이스 무응답</strong></td><td><strong>Queue size 불일치 (128 vs 256)</strong></td><td><strong>VIRTIO_QUEUE_NUM_MAX=256</strong></td></tr>
+<tr><td>5</td><td>IRQ 공유 충돌</td><td>E1000과 IRQ 11 공유</td><td>두 핸들러 동시 호출 + ISR 필터링</td></tr>
+</table>
+
+<hr>
+
+<h2>5. 최종 결과</h2>
+
+<h3>5.1 부팅 로그</h3>
+<pre><code>Virtio Block Device Found
+virtio-blk: initialized
+cpu0: starting 0
+sb: size 1000 nblocks 941 ninodes 200 nlog 30 logstart 2 inodestart 32 bmap start 58
+init: starting sh
+$</code></pre>
+
+<h3>5.2 동작 확인</h3>
+<ul>
+<li>xv6 셸 정상 기동</li>
+<li><code>ls</code> 명령으로 파일시스템 전체 내용 읽기 성공</li>
+<li>프로그램 실행 (cat, echo, hello 등) 정상 동작</li>
+<li>파일시스템 superblock 정상 파싱 (size=1000, nblocks=941, ninodes=200)</li>
+</ul>
+
+<h3>5.3 영구 저장 테스트</h3>
+<p>kernelmemfs(메모리 기반)와의 핵심 차이를 검증하기 위해 다음 테스트를 수행하였다:</p>
+<ol>
+<li>xv6 셸에서 <code>mkdir test</code> 및 <code>echo hello &gt; test.txt</code> 실행</li>
+<li>QEMU 종료 후 재실행</li>
+<li><code>ls</code> 명령으로 <code>test</code> 디렉토리와 <code>test.txt</code> 파일 존재 확인</li>
+<li><code>cat test.txt</code>로 내용(<code>hello</code>) 확인</li>
+</ol>
+<p>&rarr; 재부팅 후에도 파일이 영구 보존됨을 확인. kernelmemfs에서는 재부팅 시 모든 변경사항이 소실된다.</p>
+
+<h3>5.4 빌드 방법</h3>
+<pre><code># virtio-blk 커널 빌드
+cd /mnt/c/Users/whdud/xv6edk2/xv6
+make kernelvirtio
+
+# image 폴더에 복사 후 실행
+cp kernelvirtio ../image/kernel
+cd .. &amp;&amp; bash run_virtio.sh</code></pre>
+<p>기존 <code>kernelmemfs</code> 빌드는 그대로 유지되어 영향을 받지 않는다.</p>
+
+<hr>
+
+<h2>6. 결론</h2>
+<p>xv6에 virtio-blk 드라이버를 구현하여 UEFI 부팅 환경에서 실제 디스크 I/O를 가능하게 하였다. 핵심 난관은 virtqueue 메모리 레이아웃에서 드라이버와 디바이스 간의 queue size 불일치였으며, QEMU 모니터(<code>info qtree</code>)를 활용한 디버깅으로 근본 원인을 파악할 수 있었다.</p>
+<p>이 구현은 기존 xv6의 블록 디바이스 인터페이스(<code>ideinit</code>, <code>iderw</code>, <code>ideintr</code>)를 그대로 유지하여 파일시스템 계층(bio.c, fs.c, log.c)의 수정 없이 투명하게 동작한다.</p>
+
+<h3>향후 개선 가능 사항</h3>
+<ul>
+<li>Polling 방식에서 인터럽트 기반 Sleep/Wakeup 방식으로 전환하여 CPU 사용률 개선</li>
+<li>여러 요청의 동시 제출(batching)을 통한 I/O 처리량 향상</li>
+<li>Virtio Modern (1.0+) 인터페이스 지원</li>
+</ul>
+
+</body>
+</html>

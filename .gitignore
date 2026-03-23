@@ -1,0 +1,36 @@
+# Build artifacts
+*.o
+*.d
+*.asm
+*.sym
+*.out
+
+# xv6 build outputs
+xv6/_*
+xv6/kernel
+xv6/kernelmemfs
+xv6/kernelvirtio
+xv6/mkfs
+xv6/fs.img
+xv6/vectors.S
+xv6/bootblock*
+xv6/entryother
+xv6/initcode
+
+# Image artifacts
+image/kernel
+image/NvVars
+image/memmap
+image/fs.img
+
+# QEMU temp
+/var/tmp/vl.*
+
+# IDE
+.vscode/
+.idea/
+
+# Claude
+.claude/
+
+# Reports (keep HTML/MD in repo)

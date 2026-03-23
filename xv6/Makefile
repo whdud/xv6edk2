@@ -145,6 +145,12 @@ kernelmemfs: $(MEMFSOBJS) entry.o entryother initcode kernel.ld fs.img
 	$(LD) $(LDFLAGS) -T kernel.ld -o kernelmemfs entry.o  $(MEMFSOBJS) -b binary initcode entryother fs.img
 	$(OBJDUMP) -S kernelmemfs > kernelmemfs.asm
 	$(OBJDUMP) -t kernelmemfs | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > kernelmemfs.sym
+
+VIRTIOBJS = $(filter-out ide.o,$(OBJS)) virtio_blk.o
+kernelvirtio: $(VIRTIOBJS) entry.o entryother initcode kernel.ld fs.img
+	$(LD) $(LDFLAGS) -T kernel.ld -o kernelvirtio entry.o $(VIRTIOBJS) -b binary initcode entryother fs.img
+	$(OBJDUMP) -S kernelvirtio > kernelvirtio.asm
+	$(OBJDUMP) -t kernelvirtio | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > kernelvirtio.sym
 tags: $(OBJS) entryother.S _init
 	etags *.S *.c
 
@@ -189,6 +195,7 @@ UPROGS=\
 	_usertests\
 	_wc\
 	_zombie\
+	_hello\
 
 fs.img: mkfs README $(UPROGS)
 	./mkfs fs.img README $(UPROGS)

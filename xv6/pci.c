@@ -2,6 +2,7 @@
 #include "defs.h"
 #include "types.h"
 #include "i8254.h"
+#include "virtio_blk.h"
 
 void pci_init(){
   uint data;
@@ -92,5 +93,9 @@ void pci_init_device(uint bus_num,uint device_num,uint function_num){
     pci_access_config(bus_num,device_num,function_num,0xF0,&data);
     cprintf("Message Control:%x\n",data);
     i8254_init(&dev);
+  }
+  if(vendor_id == VIRTIO_PCI_VENDOR_ID && device_id == VIRTIO_PCI_DEVICE_ID_BLK){
+    cprintf("Virtio Block Device Found\n");
+    virtio_blk_init(&dev);
   }
 }
